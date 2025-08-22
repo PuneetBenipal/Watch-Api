@@ -2,7 +2,10 @@ const Stripe = require("stripe");
 const Company = require("../models/Company.model");
 const Payment = require("../models/Payment.model");
 const User = require("../models/User.model");
+const Discount = require("../models/Discount");
+const Redemption = require("../models/Redemption");
 let stripe = null;
+
 function getStripeClient() {
   if (stripe) return stripe;
   const key = process.env.STRIPE_SECRET_KEY;
@@ -27,36 +30,36 @@ const PRICE_LOOKUP = {
 };
 
 const stripeCtrl = {
-  createCheckoutSession: async (req, res) => {
-    try {
-      const { items = [], mode = "payment", plan } = req.body;
+    createCheckoutSession: async (req, res) => {
+        try {
+            const { items = [], mode = "payment", plan } = req.body;
 
-      let planId = PRICE_LOOKUP[plan];
+            let planId = PRICE_LOOKUP[plan];
 
-      if (!planId) {
+            if (!planId) {
         const line_items = items.map((item) => {
-          const base = {
-            price_data: {
-              currency: "usd",
-              unit_amount: Math.round(item.unitUsd * 100),
-              product_data: { name: item.name, metadata: { sku: item.sku } },
-            },
-            quantity: item.qty,
-          };
-          if (mode === "subscription") {
+                    const base = {
+                        price_data: {
+                            currency: "usd",
+                            unit_amount: Math.round(item.unitUsd * 100),
+                            product_data: { name: item.name, metadata: { sku: item.sku } },
+                        },
+                        quantity: item.qty,
+                    };
+                    if (mode === "subscription") {
             base.price_data.recurring = {
               interval: "month",
               interval_count: 1,
             };
-          }
-          return base;
-        });
+                    }
+                    return base;
+                });
 
         const params = {
-          mode,
-          line_items,
-          success_url: `${process.env.USER_CLIENT_URL}/account/billing`,
-          cancel_url: `${process.env.USER_CLIENT_URL}/account/plan`,
+                    mode,
+                    line_items,
+                    success_url: `${process.env.USER_CLIENT_URL}/account/billing`,
+                    cancel_url: `${process.env.USER_CLIENT_URL}/account/plan`,
         };
 
         // If this is a subscription without a predefined price, attach metadata to the subscription created
@@ -73,8 +76,8 @@ const stripeCtrl = {
         const session =
           await getStripeClient().checkout.sessions.create(params);
 
-        res.json({ url: session.url });
-      } else {
+                res.json({ url: session.url });
+            } else {
         // Map plan key to feature (used in entitlements update)
         const planKey = plan;
         let feature = undefined;
@@ -86,92 +89,132 @@ const stripeCtrl = {
           mode: "subscription",
           payment_method_types: ["card"],
           line_items: [{ price: planId, quantity: 1 }],
-          success_url: `${process.env.USER_CLIENT_URL}/account/billing`,
-          cancel_url: `${process.env.USER_CLIENT_URL}/account/plan`,
-          subscription_data: {
-            metadata: {
-              companyId: req.user?.companyId.toString(),
-              userId: req.user?._id?.toString(),
-              planId: planId,
+                    success_url: `${process.env.USER_CLIENT_URL}/account/billing`,
+                    cancel_url: `${process.env.USER_CLIENT_URL}/account/plan`,
+                    subscription_data: {
+                        metadata: {
+                            companyId: req.user?.companyId.toString(),
+                            userId: req.user?._id?.toString(),
+                            planId: planId,
               ...(feature ? { feature } : {}),
-            },
-          },
-        });
+                        },
+                    },
+                });
 
-        res.json({ url: session.url });
-      }
-    } catch (err) {
-      console.error("createCheckoutSession", err.message);
+                res.json({ url: session.url });
+            }
+        } catch (err) {
+            console.error("createCheckoutSession", err.message);
       res.status(500).json({ error: "Failed to create checkout session" });
-    }
-  },
+        }
+    },
 
-  webhookHandler: async (req, res) => {
-    let event;
+    webhookHandler: async (req, res) => {
+        let event;
 
-    try {
+        try {
       event = getStripeClient().webhooks.constructEvent(
-        req.body, // raw body
+                req.body, // raw body
         req.headers["stripe-signature"],
-        process.env.STRIPE_WEBHOOK_SECRET
-      );
-    } catch (err) {
+                process.env.STRIPE_WEBHOOK_SECRET
+            );
+        } catch (err) {
       console.log("err.message", err.message);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
+            return res.status(400).send(`Webhook Error: ${err.message}`);
+        }
 
-    try {
-      switch (event.type) {
+        try {
+            switch (event.type) {
         case "checkout.session.completed": {
-          const session = event.data.object;
+                    const session = event.data.object;
 
           const subId =
             typeof session.subscription === "string"
-              ? session.subscription
-              : session.subscription?.id;
-          if (!subId) break; // not a subscription checkout
+                        ? session.subscription
+                        : session.subscription?.id;
+                    if (!subId) break; // not a subscription checkout
           const sub = await getStripeClient().subscriptions.retrieve(subId);
-          const { companyId, feature } = sub.metadata || {};
+                    const { companyId, feature } = sub.metadata || {};
 
-          break;
-        }
+                    // Discount/TRIAL redemption tracking (if passed via metadata)
+                    try {
+                      const customerId = session.metadata?.customer_id || null;
+                      const discountId = session.metadata?.applied_discount_id || null;
+                      const itemKey = session.metadata?.applied_item_key || null;
 
-        // Prefer this event name (more common) over invoice.paid
+                      if (customerId && discountId && itemKey === "TRIAL_DAYS") {
+                        let trialDays = null;
+                        if (sub?.trial_start && sub?.trial_end) {
+                          trialDays = Math.round((sub.trial_end - sub.trial_start) / (24 * 60 * 60));
+                        }
+
+                        await Redemption.create({
+                          discountId,
+                          customerId,
+                          appliedTo: "checkout",
+                          stripe: {
+                            customerId: session.customer || null,
+                            sessionId: session.id,
+                            subscriptionId: subId,
+                          },
+                          priceId: null,
+                          quantity: null,
+                          amounts: {
+                            currency: session.currency || null,
+                            subtotal: 0,
+                            discount: 0,
+                            total: 0,
+                          },
+                          ruleSnapshot: {
+                            itemKey: "TRIAL_DAYS",
+                            trialDays,
+                          },
+                          sourceEvent: event.type,
+                        });
+                      }
+                    } catch (e) {
+                      console.warn("checkout.session.completed redemption error", e?.message || e);
+                    }
+
+                    break;
+                }
+
+                // Prefer this event name (more common) over invoice.paid
         case "invoice.payment_succeeded": {
           const invoice = event.data.object; // <-- NOT a session
           const amount = invoice.amount_paid / 100; // minor units
-          const currency = (invoice.currency || "USD").toUpperCase();
-          const paymentId = event.data.object.payment_intent;
+                    const currency = (invoice.currency || "USD").toUpperCase();
+                    const paymentId = event.data.object.payment_intent;
 
           console.log("invoice == >", invoice);
 
-          // Guard: only proceed if this invoice belongs to a subscription
+                    // Guard: only proceed if this invoice belongs to a subscription
           const subId =
             typeof invoice.subscription === "string"
               ? invoice.subscription
               : invoice.subscription?.id;
 
-          if (!subId) break;
+                    if (!subId) break;
 
           const sub = await getStripeClient().subscriptions.retrieve(subId);
-          const { companyId, userId, planId, feature } = sub.metadata || {};
+                    const { companyId, userId, planId, feature } = sub.metadata || {};
 
           console.log("paymentId", paymentId);
 
-          let payment = new Payment({
-            companyId: companyId,
-            paymentId: paymentId,
-            amount: amount,
-            currency: currency,
-            method: "card",
-            status: "paid",
-            feature: planId ? feature + "Plan" : feature,
-            paidAt: Date.now(),
-            createdAt: Date.now(),
+                    let payment = new Payment({
+                        companyId: companyId,
+                        paymentId: paymentId,
+                        amount: amount,
+                        currency: currency,
+                        method: "card",
+                        status: "paid",
+                        feature: planId ? feature + "Plan" : feature,
+                        paidAt: Date.now(),
+                        createdAt: Date.now(),
           });
           await payment.save();
 
-          const company = await Company.findOne({ _id: companyId });
+                    const company = await Company.findOne({ _id: companyId });
           const user = await User.findOne({ _id: userId });
 
           if (!company)
@@ -184,64 +227,118 @@ const stripeCtrl = {
             paidAt: Date.now(),
           });
 
-          // if (!!planId) {
+                    // if (!!planId) {
+                        
+                    // } else {
 
-          // } else {
+                    // }
 
-          // }
+                    // if (feature == "team_mate") {
+                    //     company.seats.purchased += 1;
+                    // }
 
-          // if (feature == "team_mate") {
-          //     company.seats.purchased += 1;
-          // }
+                    // console.log("feature", feature, typeof currency, currency)
 
-          // console.log("feature", feature, typeof currency, currency)
-
-          let updatedEntitlements = company.entitlements.map((entitlement) => {
-            if (entitlement.feature == feature) {
-              switch (feature) {
-                case "whatsapp_search":
-                  if (amount == 95) {
-                    user.whatsappStatus.limit = 500;
-                    user.whatsappStatus.paidAt = Date.now();
-                    entitlement.limits += 500;
-                    entitlement.updatedAt = Date.now();
-                  } else if (amount == 20) {
-                    entitlement.limits += 100;
-                    entitlement.updatedAt = Date.now();
-                  }
-                  break;
-                case "team_mate":
-                  if (amount == 25) {
-                    entitlement.limits += 1;
-                    entitlement.updatedAt = Date.now();
-                  }
-                  break;
-                case "inventory":
-                  if (amount == 50) {
-                    entitlement.isTrial = false;
-                    entitlement.updatedAt = Date.now();
+                    let updatedEntitlements = company.entitlements.map((entitlement) => {
+                        if (entitlement.feature == feature) {
+                            switch (feature) {
+                                case "whatsapp_search":
+                                    if (amount == 95) {
+                                        user.whatsappStatus.limit = 500;
+                                        user.whatsappStatus.paidAt = Date.now();
+                                        entitlement.limits += 500;
+                                        entitlement.updatedAt = Date.now();
+                                    } else if (amount == 20) {
+                                        entitlement.limits += 100;
+                                        entitlement.updatedAt = Date.now();
+                                    }
+                                    break;
+                                case "team_mate":
+                                    if (amount == 25) {
+                                        entitlement.limits += 1;
+                                        entitlement.updatedAt = Date.now();
+                                    }
+                                    break;
+                                case "inventory":
+                                    if (amount == 50) {
+                                        entitlement.isTrial = false;
+                                        entitlement.updatedAt = Date.now();
                     let nextEndsAt =
                       new Date(entitlement.endsAt).getTime() +
                       30 * 24 * 60 * 60 * 1000;
 
                     entitlement.endsAt = new Date(nextEndsAt);
-                  }
-              }
-            }
-            return entitlement;
+                                    }
+                            }
+                        }
+                        return entitlement;
           });
 
-          company.entitlements = updatedEntitlements;
+                    company.entitlements = updatedEntitlements;
 
-          console.log("payment ", companyId, amount, currency, feature);
+                    console.log("payment ", companyId, amount, currency, feature);
           await company.save();
           await user.save();
-          break;
-        }
-      }
 
-      res.json({ received: true });
-    } catch (err) {
+                    // Discount redemption tracking on invoice (if metadata present)
+                    try {
+                      const metaCustomerId = invoice.metadata?.customer_id || null;
+                      const metaDiscountId = invoice.metadata?.applied_discount_id || null;
+                      let discountAmount = 0;
+                      if (Array.isArray(invoice.total_discount_amounts)) {
+                        for (const d of invoice.total_discount_amounts) discountAmount += d.amount || 0;
+                      }
+
+                      if (metaCustomerId && metaDiscountId) {
+                        const prev = await Redemption.countDocuments({ discountId: metaDiscountId, customerId: metaCustomerId });
+                        const monthIndex = prev + 1;
+                        const discountDoc = await Discount.findById(metaDiscountId);
+
+                        const subscriptionId = typeof invoice.subscription === "string" ? invoice.subscription : invoice.subscription?.id || null;
+
+                        await Redemption.create({
+                          discountId: metaDiscountId,
+                          customerId: metaCustomerId,
+                          appliedTo: "invoice",
+                          stripe: {
+                            customerId: invoice.customer,
+                            invoiceId: invoice.id,
+                            subscriptionId,
+                            couponId: invoice.discount?.coupon?.id || null,
+                          },
+                          priceId: invoice.lines?.data?.[0]?.price?.id || null,
+                          quantity: invoice.lines?.data?.[0]?.quantity || null,
+                          amounts: {
+                            currency: invoice.currency,
+                            subtotal: invoice.amount_subtotal ?? 0,
+                            discount: discountAmount,
+                            total: invoice.amount_due ?? invoice.amount_total ?? 0,
+                          },
+                          ruleSnapshot: {
+                            itemKey: discountDoc?.itemKey || null,
+                            percentOff: discountDoc?.percentOff ?? null,
+                            amountOff: discountDoc?.amountOff ?? null,
+                            currency: discountDoc?.currency ?? null,
+                            firstNMonths: discountDoc?.firstNMonths ?? null,
+                            trialDays: discountDoc?.trialDays ?? null,
+                          },
+                          period: {
+                            start: invoice.period_start ? new Date(invoice.period_start * 1000) : null,
+                            end: invoice.period_end ? new Date(invoice.period_end * 1000) : null,
+                            monthIndex,
+                          },
+                          sourceEvent: event.type,
+                        });
+                      }
+                    } catch (e) {
+                      console.warn("invoice.payment_succeeded redemption error", e?.message || e);
+                    }
+                    break;
+                }
+            }
+
+            res.json({ received: true });
+        } catch (err) {
       console.error("Webhook handler error", err);
       console.error("Webhook handler error", err.message);
       res.status(500).send("Webhook handler failed");

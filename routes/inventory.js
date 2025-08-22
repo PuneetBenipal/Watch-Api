@@ -88,11 +88,9 @@ router.post(
             .json({ error: "File too large. Maximum size is 10MB." });
         }
         if (err.code === "LIMIT_UNEXPECTED_FILE") {
-          return res
-            .status(400)
-            .json({
-              error: "Unexpected file field. Expected field name: csvFile",
-            });
+          return res.status(400).json({
+            error: "Unexpected file field. Expected field name: csvFile",
+          });
         }
         return res
           .status(400)

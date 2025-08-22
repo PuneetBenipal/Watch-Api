@@ -3,11 +3,12 @@ const express = require("express");
 const router = express.Router();
 const mongoose = require("mongoose");
 const Invoice = require("../models/Invoice.model");
-const authenticateToken = require('../middleware/auth');
+const authenticateToken = require("../middleware/auth");
+const PDFDocument = require("pdfkit");
 
 //Inventory date filter
 const { Inventory } = require("../models/inventory");
-const ObjectId = require('mongoose').Types.ObjectId;
+const ObjectId = require("mongoose").Types.ObjectId;
 
 function InvoiceNocreate() {
   const year = new Date().getFullYear();
@@ -19,6 +20,9 @@ router.use(authenticateToken);
 
 const OID = mongoose.Types.ObjectId;
 
+// Supported payment methods (align with model enum)
+const VALID_METHODS = ["CASH", "WIRE", "CRYPTO", "ESCROW", "CREDIT CARD"];
+
 // replace with real auth/tenant resolution
 function tenantId(req) {
   return new OID(req.user.companyId);
@@ -28,25 +32,40 @@ function tenantId(req) {
 router.post("/", async (req, res) => {
   try {
     const {
-      customer_name, customer_email, customer_phone, customer_adress,
-      items = [], currency = "USD",
-      tax_rate = 0, notes, inventory_watch_id,
-      payment_method = "CASH", dueDate
+      customer_name,
+      customer_email,
+      customer_phone,
+      customer_adress,
+      items = [],
+      currency = "USD",
+      tax_rate = 0,
+      notes,
+      inventory_watch_id,
+      payment_method = "CASH",
+      dueDate,
+
+      // --- NEW Premium Fields -------------------------
+      premium = false,
+      premium_features = [],
+      // ------------------------------------------------
     } = req.body || {};
 
-    console.log("This is invoice page");
-    console.log(req.body);
-
     const pm = String(payment_method).toUpperCase();
-    if (!["CASH", "WIRE"].includes(pm)) return res.status(400).json({ error: "payment_method must be CASH or WIRE" });
+    if (!VALID_METHODS.includes(pm))
+      return res
+        .status(400)
+        .json({ error: "payment_method must be one of: CASH, WIRE, CRYPTO, ESCROW, CREDIT CARD" });
 
     // compute totals server-side
-    const computed = items.map(it => {
+    const computed = items.map((it) => {
       const qty = Number(it.qty);
       const unit_price = Number(it.unit_price);
       return { ...it, qty, unit_price, line_total: qty * unit_price };
     });
-    const subtotal = computed.reduce((s, it) => s + Number(it.line_total || 0), 0);
+    const subtotal = computed.reduce(
+      (s, it) => s + Number(it.line_total || 0),
+      0
+    );
     const taxAmount = Number(((tax_rate || 0) * subtotal).toFixed(2));
     const total = Number((subtotal + taxAmount).toFixed(2));
 
@@ -69,15 +88,22 @@ router.post("/", async (req, res) => {
       total,
       payment_method: pm,
       status: "SENT", // "issued" as per requirement
-      inventory_watch_id: inventory_watch_id ? new OID(inventory_watch_id) : undefined,
+      inventory_watch_id: inventory_watch_id
+        ? new OID(inventory_watch_id)
+        : undefined,
       notes,
+
+      // --- Save premium fields -------------------------
+      premium,
+      premium_features,
+      // -------------------------------------------------
     });
 
     res.status(201).json({
-      message: 'success',
+      message: "success",
       id: doc._id,
       invoice_want_add,
-      pdf_url: `/api/invoices/pdf/${doc._id}`
+      pdf_url: `/api/invoices/pdf/${doc._id}`,
     });
   } catch (e) {
     console.error(e);
@@ -91,7 +117,10 @@ router.get("/", async (req, res) => {
     const company = tenantId(req);
 
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 10));
+    const limit = Math.min(
+      200,
+      Math.max(1, parseInt(req.query.limit, 10) || 10)
+    );
     const skip = (page - 1) * limit;
 
     const statusFilter = (req.query.status || "").toUpperCase();
@@ -105,7 +134,6 @@ router.get("/", async (req, res) => {
       q.status = statusFilter;
     }
 
-    const VALID_METHODS = ["CASH", "WIRE", "CRYPTO", "ESCROW", "CREDIT CARD"];
     if (VALID_METHODS.includes(paymentFilter)) {
       q.payment_method = paymentFilter;
     }
@@ -123,11 +151,7 @@ router.get("/", async (req, res) => {
 
     // Run queries
     const [invoices, total] = await Promise.all([
-      Invoice.find(q)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .lean(),
+      Invoice.find(q).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
       Invoice.countDocuments(q),
     ]);
 
@@ -150,9 +174,9 @@ router.get("/summary", async (req, res) => {
     const companyId = tenantId(req);
     const agg = await Invoice.aggregate([
       { $match: { companyId } },
-      { $group: { _id: "$payment_method", c: { $sum: 1 } } }
+      { $group: { _id: "$payment_method", c: { $sum: 1 } } },
     ]);
-    const by = Object.fromEntries(agg.map(a => [a._id, a.c]));
+    const by = Object.fromEntries(agg.map((a) => [a._id, a.c]));
     const cash = by.CASH || 0;
     const wire = by.WIRE || 0;
     res.json({ all: cash + wire, cash, wire });
@@ -166,16 +190,28 @@ router.get("/summary", async (req, res) => {
 router.post("/:id/pay", async (req, res) => {
   try {
     const { amount, method, note } = req.body || {};
-    if (!amount || amount <= 0) return res.status(400).json({ error: "amount > 0 required" });
+    if (!amount || amount <= 0)
+      return res.status(400).json({ error: "amount > 0 required" });
     const m = String(method || "").toUpperCase();
-    if (!["CASH", "WIRE"].includes(m)) return res.status(400).json({ error: "method must be CASH or WIRE" });
+    if (!["CASH", "WIRE"].includes(m))
+      return res.status(400).json({ error: "method must be CASH or WIRE" });
 
-    const inv = await Invoice.findOne({ _id: req.params.id, companyId: tenantId(req) });
+    const inv = await Invoice.findOne({
+      _id: req.params.id,
+      companyId: tenantId(req),
+    });
     if (!inv) return res.status(404).json({ error: "not found" });
 
     inv.payments.push({ amount: Number(amount), method: m, note });
-    inv.paid_amount = Number((Number(inv.paid_amount || 0) + Number(amount)).toFixed(2));
-    inv.status = inv.paid_amount >= inv.total ? "PAID" : (inv.paid_amount > 0 ? "PARTIAL" : inv.status);
+    inv.paid_amount = Number(
+      (Number(inv.paid_amount || 0) + Number(amount)).toFixed(2)
+    );
+    inv.status =
+      inv.paid_amount >= inv.total
+        ? "PAID"
+        : inv.paid_amount > 0
+          ? "PARTIAL"
+          : inv.status;
     await inv.save();
 
     res.json({ ok: true, status: inv.status, paid_amount: inv.paid_amount });
@@ -186,18 +222,28 @@ router.post("/:id/pay", async (req, res) => {
 });
 
 router.get("/pdf/:id", async (req, res) => {
-  const inv = await Invoice.findById(req.params.id).lean();
-  console.log(inv)
+  const inv = await Invoice.findOne({
+    _id: req.params.id,
+    companyId: tenantId(req),
+  }).lean();
+
   if (!inv) return res.status(404).end();
 
   res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `inline; filename="${inv.invoice_no}.pdf"`);
+  res.setHeader(
+    "Content-Disposition",
+    `inline; filename="${inv.invoice_no}.pdf"`
+  );
 
   const doc = new PDFDocument({ size: "A4", margin: 40 });
   doc.pipe(res);
 
   // Header / branding
-  doc.fontSize(18).text("INVOICE", { continued: true }).fontSize(12).text(`  ${inv.invoice_no}`);
+  doc
+    .fontSize(18)
+    .text("INVOICE", { continued: true })
+    .fontSize(12)
+    .text(`  ${inv.invoice_no}`);
   doc.moveDown(0.5);
   doc.text(`Payment Method: ${inv.payment_method}`);
   doc.text(`Customer: ${inv.customer_name || inv.customer_phone}`);
@@ -206,20 +252,43 @@ router.get("/pdf/:id", async (req, res) => {
   // Line items
   doc.fontSize(11);
   inv.items.forEach((it) => {
-    doc.text(`${it.qty} x ${it.description} @ ${inv.currency} ${Number(it.unit_price).toFixed(2)} = ${inv.currency} ${Number(it.line_total).toFixed(2)}`);
+    doc.text(
+      `${it.qty} x ${it.description} @ ${inv.currency} ${Number(it.unit_price).toFixed(2)} = ${inv.currency} ${Number(it.line_total).toFixed(2)}`
+    );
   });
   doc.moveDown();
 
   // Totals
   doc.text(`Subtotal: ${inv.currency} ${Number(inv.subtotal).toFixed(2)}`);
-  if (inv.tax_rate) doc.text(`Tax (${(inv.tax_rate * 100).toFixed(2)}%): ${inv.currency} ${Number(inv.tax_amount).toFixed(2)}`);
+  if (inv.tax_rate)
+    doc.text(
+      `Tax (${(inv.tax_rate * 100).toFixed(2)}%): ${inv.currency} ${Number(inv.tax_amount).toFixed(2)}`
+    );
   doc.text(`Total: ${inv.currency} ${Number(inv.total).toFixed(2)}`);
   doc.moveDown();
-  doc.text(`Status: ${inv.status}  •  Paid: ${inv.currency} ${Number(inv.paid_amount || 0).toFixed(2)}`);
+  doc.text(
+    `Status: ${inv.status}  •  Paid: ${inv.currency} ${Number(inv.paid_amount || 0).toFixed(2)}`
+  );
+
+  // --- Show Premium fields if applicable -----------------
+  if (inv.premium) {
+    doc.moveDown();
+    doc.fontSize(12).fillColor("blue").text("Premium Invoice Features:");
+    inv.premium_features?.forEach((f) => {
+      doc
+        .fontSize(10)
+        .fillColor("black")
+        .text(`- ${f.feature_name}: ${f.feature_value}`);
+    });
+  }
+  // -------------------------------------------------------
 
   // Footer
   doc.moveDown(2);
-  doc.fontSize(9).fillOpacity(0.6).text("Your Company • Branded PDF • WatchDealerHub", { align: "center" });
+  doc
+    .fontSize(9)
+    .fillOpacity(0.6)
+    .text("Your Company • Branded PDF • WatchDealerHub", { align: "center" });
 
   doc.end();
 });
@@ -227,14 +296,13 @@ router.get("/pdf/:id", async (req, res) => {
 router.get("/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    console.log("Hello world")
-    console.log(id)
 
     const company = tenantId(req);
-    console.log("fofofo")
-    console.log(req);
-    console.log(company)
-    const invoice = await Invoice.findOne({ _id: id, companyId: company }).lean();
+
+    const invoice = await Invoice.findOne({
+      _id: id,
+      companyId: company,
+    }).lean();
 
     if (!invoice) {
       return res.status(404).json({ error: "Invoice not found" });
@@ -250,20 +318,19 @@ router.get("/:id", async (req, res) => {
   }
 });
 
-
 //Inventory value filter
 router.post("/somedata", async (req, res) => {
   try {
     const { items } = req.body;
 
     if (!items || !Array.isArray(items)) {
-      return res.status(400).json({ message: 'Invalid items array' });
+      return res.status(400).json({ message: "Invalid items array" });
     }
 
     const inventoryData = await Promise.all(
       items.map(async (item) => {
         if (!ObjectId.isValid(item.sku)) {
-          return { ...item, inventoryInfo: null, error: 'Invalid SKU format' };
+          return { ...item, inventoryInfo: null, error: "Invalid SKU format" };
         }
 
         const skuObjectId = new ObjectId(item.sku);
@@ -279,7 +346,7 @@ router.post("/somedata", async (req, res) => {
     res.json({ inventoryData });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ message: "Server error" });
   }
 });
 

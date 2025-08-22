@@ -2,7 +2,7 @@ const PDFDocument = require("pdfkit");
 const fs = require("fs");
 const path = require("path");
 const Invoice = require("../models/Invoice.model.js");
-const {Inventory} = require("../models/inventory");
+const { Inventory } = require("../models/inventory");
 
 class PDFGenerator {
   constructor() {
@@ -14,6 +14,7 @@ class PDFGenerator {
       const invoice = await Invoice.findById(invoiceId)
         .populate("sellerId", "name email")
         .populate("items");
+      const Company = require("../models/Company.model");
 
       if (!invoice) {
         throw new Error("Invoice not found");
@@ -21,7 +22,7 @@ class PDFGenerator {
 
       const doc = new PDFDocument({
         size: "A4",
-        margin: 50
+        margin: 50,
       });
 
       this.doc = doc;
@@ -40,12 +41,18 @@ class PDFGenerator {
       doc.pipe(stream);
 
       // Generate PDF content
-      this.generateHeader(invoice);
+      // Branding (if enabled)
+      const company = invoice.companyId
+        ? await Company.findById(invoice.companyId).lean()
+        : null;
+      const branding = company?.branding?.enabled ? company.branding : null;
+
+      this.generateHeader(invoice, branding);
       this.generateCustomerInfo(invoice);
       this.generateInvoiceDetails(invoice);
       this.generateItemsTable(invoice);
       this.generateTotals(invoice);
-      this.generateFooter(invoice);
+      this.generateFooter(invoice, branding);
 
       // Finalize PDF
       doc.end();
@@ -66,27 +73,40 @@ class PDFGenerator {
     }
   }
 
-  generateHeader(invoice) {
+  generateHeader(invoice, branding) {
     const doc = this.doc;
 
     // Company logo and info
-    doc.fontSize(20)
-      .font("Helvetica-Bold")
-      .text("WatchDealerHub", { align: "left" });
+    if (branding?.headerLogoUrl) {
+      try {
+        doc.image(branding.headerLogoUrl, 50, 45, { width: 120 });
+      } catch {}
+    }
 
-    doc.fontSize(10)
+    doc.moveDown(branding?.headerLogoUrl ? 2 : 0);
+    doc
+      .fillColor(branding?.primaryColor || "#000000")
+      .fontSize(20)
+      .font("Helvetica-Bold")
+      .text("WatchDealerHub", { align: "left" })
+      .fillColor("#000000");
+
+    doc
+      .fontSize(10)
       .font("Helvetica")
       .text("Professional Watch Trading Platform", { align: "left" })
       .moveDown(0.5);
 
-    doc.fontSize(8)
+    doc
+      .fontSize(8)
       .text("Dubai, UAE", { align: "left" })
       .text("Email: support@watchdealerhub.com", { align: "left" })
       .text("Phone: +971 50 123 4567", { align: "left" })
       .moveDown(2);
 
     // Invoice title
-    doc.fontSize(24)
+    doc
+      .fontSize(24)
       .font("Helvetica-Bold")
       .text("INVOICE", { align: "center" })
       .moveDown(1);
@@ -96,12 +116,14 @@ class PDFGenerator {
     const doc = this.doc;
 
     // Bill to section
-    doc.fontSize(12)
+    doc
+      .fontSize(12)
       .font("Helvetica-Bold")
       .text("Bill To:", { align: "left" })
       .moveDown(0.5);
 
-    doc.fontSize(10)
+    doc
+      .fontSize(10)
       .font("Helvetica")
       .text(invoice.buyer.name, { align: "left" });
 
@@ -139,7 +161,8 @@ class PDFGenerator {
     const colWidth = 100;
 
     // Headers
-    doc.fontSize(10)
+    doc
+      .fontSize(10)
       .font("Helvetica-Bold")
       .text("Invoice No:", tableLeft, tableTop)
       .text("Date:", tableLeft, tableTop + 20)
@@ -148,11 +171,20 @@ class PDFGenerator {
       .text("Status:", tableLeft, tableTop + 80);
 
     // Values
-    doc.fontSize(10)
+    doc
+      .fontSize(10)
       .font("Helvetica")
       .text(invoice.invoiceNo, tableLeft + colWidth, tableTop)
-      .text(new Date(invoice.createdAt).toLocaleDateString(), tableLeft + colWidth, tableTop + 20)
-      .text(new Date(invoice.dueDate).toLocaleDateString(), tableLeft + colWidth, tableTop + 40)
+      .text(
+        new Date(invoice.createdAt).toLocaleDateString(),
+        tableLeft + colWidth,
+        tableTop + 20
+      )
+      .text(
+        new Date(invoice.dueDate).toLocaleDateString(),
+        tableLeft + colWidth,
+        tableTop + 40
+      )
       .text(invoice.paymentMethod, tableLeft + colWidth, tableTop + 60)
       .text(invoice.status, tableLeft + colWidth, tableTop + 80);
 
@@ -166,16 +198,26 @@ class PDFGenerator {
     const colWidths = [50, 200, 100, 100, 100]; // Qty, Description, Price, Total
 
     // Table headers
-    doc.fontSize(10)
+    doc
+      .fontSize(10)
       .font("Helvetica-Bold")
       .text("#", tableLeft, tableTop)
       .text("Description", tableLeft + colWidths[0], tableTop)
       .text("Brand/Model", tableLeft + colWidths[0] + colWidths[1], tableTop)
-      .text("Price", tableLeft + colWidths[0] + colWidths[1] + colWidths[2], tableTop)
-      .text("Total", tableLeft + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3], tableTop);
+      .text(
+        "Price",
+        tableLeft + colWidths[0] + colWidths[1] + colWidths[2],
+        tableTop
+      )
+      .text(
+        "Total",
+        tableLeft + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3],
+        tableTop
+      );
 
     // Draw header line
-    doc.moveTo(tableLeft, tableTop + 15)
+    doc
+      .moveTo(tableLeft, tableTop + 15)
       .lineTo(tableLeft + 500, tableTop + 15)
       .stroke();
 
@@ -185,19 +227,29 @@ class PDFGenerator {
     for (let i = 0; i < invoice.items.length; i++) {
       const item = invoice.items[i];
 
-      doc.fontSize(9)
+      doc
+        .fontSize(9)
         .font("Helvetica")
         .text((i + 1).toString(), tableLeft, currentY)
         .text(item.brand + " " + item.model, tableLeft + colWidths[0], currentY)
         .text(item.refNo, tableLeft + colWidths[0] + colWidths[1], currentY)
-        .text(`${invoice.currency} ${item.priceListed.toLocaleString()}`, tableLeft + colWidths[0] + colWidths[1] + colWidths[2], currentY)
-        .text(`${invoice.currency} ${item.priceListed.toLocaleString()}`, tableLeft + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3], currentY);
+        .text(
+          `${invoice.currency} ${item.priceListed.toLocaleString()}`,
+          tableLeft + colWidths[0] + colWidths[1] + colWidths[2],
+          currentY
+        )
+        .text(
+          `${invoice.currency} ${item.priceListed.toLocaleString()}`,
+          tableLeft + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3],
+          currentY
+        );
 
       currentY += 20;
     }
 
     // Draw bottom line
-    doc.moveTo(tableLeft, currentY)
+    doc
+      .moveTo(tableLeft, currentY)
       .lineTo(tableLeft + 500, currentY)
       .stroke();
 
@@ -209,42 +261,67 @@ class PDFGenerator {
     const totalsLeft = 400;
     const totalsTop = doc.y;
 
-    doc.fontSize(10)
+    doc
+      .fontSize(10)
       .font("Helvetica-Bold")
       .text("Subtotal:", totalsLeft, totalsTop)
       .text("Tax:", totalsLeft, totalsTop + 20)
       .text("Discount:", totalsLeft, totalsTop + 40)
       .text("Total:", totalsLeft, totalsTop + 60);
 
-    doc.fontSize(10)
+    doc
+      .fontSize(10)
       .font("Helvetica")
-      .text(`${invoice.currency} ${invoice.subtotal.toLocaleString()}`, totalsLeft + 100, totalsTop)
-      .text(`${invoice.currency} ${invoice.tax.toLocaleString()}`, totalsLeft + 100, totalsTop + 20)
-      .text(`${invoice.currency} ${invoice.discount.toLocaleString()}`, totalsLeft + 100, totalsTop + 40)
-      .text(`${invoice.currency} ${invoice.total.toLocaleString()}`, totalsLeft + 100, totalsTop + 60);
+      .text(
+        `${invoice.currency} ${invoice.subtotal.toLocaleString()}`,
+        totalsLeft + 100,
+        totalsTop
+      )
+      .text(
+        `${invoice.currency} ${invoice.tax.toLocaleString()}`,
+        totalsLeft + 100,
+        totalsTop + 20
+      )
+      .text(
+        `${invoice.currency} ${invoice.discount.toLocaleString()}`,
+        totalsLeft + 100,
+        totalsTop + 40
+      )
+      .text(
+        `${invoice.currency} ${invoice.total.toLocaleString()}`,
+        totalsLeft + 100,
+        totalsTop + 60
+      );
 
     // Draw total line
-    doc.moveTo(totalsLeft, totalsTop + 70)
+    doc
+      .moveTo(totalsLeft, totalsTop + 70)
       .lineTo(totalsLeft + 150, totalsTop + 70)
       .stroke();
 
     doc.moveDown(3);
   }
 
-  generateFooter(invoice) {
+  generateFooter(invoice, branding) {
     const doc = this.doc;
 
-    doc.fontSize(8)
+    doc
+      .fontSize(8)
       .font("Helvetica")
-      .text("Thank you for your business!", { align: "center" })
+      .text(branding?.footerText || "Thank you for your business!", {
+        align: "center",
+      })
       .moveDown(0.5)
-      .text("This is a computer-generated invoice. No signature required.", { align: "center" })
+      .text("This is a computer-generated invoice. No signature required.", {
+        align: "center",
+      })
       .moveDown(0.5)
       .text(`Generated on ${new Date().toLocaleString()}`, { align: "center" });
 
     // Terms and conditions
     if (invoice.notes) {
-      doc.moveDown(2)
+      doc
+        .moveDown(2)
         .fontSize(9)
         .font("Helvetica-Bold")
         .text("Notes:", { align: "left" })
@@ -267,7 +344,7 @@ class PDFGenerator {
 
       const doc = new PDFDocument({
         size: "A4",
-        margin: 50
+        margin: 50,
       });
 
       this.doc = doc;
@@ -303,12 +380,14 @@ class PDFGenerator {
   generateReportHeader(title) {
     const doc = this.doc;
 
-    doc.fontSize(20)
+    doc
+      .fontSize(20)
       .font("Helvetica-Bold")
       .text(title, { align: "center" })
       .moveDown(1);
 
-    doc.fontSize(10)
+    doc
+      .fontSize(10)
       .font("Helvetica")
       .text(`Generated on ${new Date().toLocaleString()}`, { align: "center" })
       .moveDown(2);
@@ -321,32 +400,69 @@ class PDFGenerator {
     const colWidths = [80, 120, 100, 80, 100, 80]; // Brand, Model, Ref, Price, Status, Dealer
 
     // Headers
-    doc.fontSize(9)
+    doc
+      .fontSize(9)
       .font("Helvetica-Bold")
       .text("Brand", tableLeft, tableTop)
       .text("Model", tableLeft + colWidths[0], tableTop)
       .text("Ref No", tableLeft + colWidths[0] + colWidths[1], tableTop)
-      .text("Price", tableLeft + colWidths[0] + colWidths[1] + colWidths[2], tableTop)
-      .text("Status", tableLeft + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3], tableTop)
-      .text("Dealer", tableLeft + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4], tableTop);
+      .text(
+        "Price",
+        tableLeft + colWidths[0] + colWidths[1] + colWidths[2],
+        tableTop
+      )
+      .text(
+        "Status",
+        tableLeft + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3],
+        tableTop
+      )
+      .text(
+        "Dealer",
+        tableLeft +
+          colWidths[0] +
+          colWidths[1] +
+          colWidths[2] +
+          colWidths[3] +
+          colWidths[4],
+        tableTop
+      );
 
     let currentY = tableTop + 20;
 
     // Table rows
     inventory.forEach((item, index) => {
-      if (currentY > 700) { // New page if near bottom
+      if (currentY > 700) {
+        // New page if near bottom
         doc.addPage();
         currentY = 50;
       }
 
-      doc.fontSize(8)
+      doc
+        .fontSize(8)
         .font("Helvetica")
         .text(item.brand, tableLeft, currentY)
         .text(item.model, tableLeft + colWidths[0], currentY)
         .text(item.refNo, tableLeft + colWidths[0] + colWidths[1], currentY)
-        .text(`$${item.priceListed.toLocaleString()}`, tableLeft + colWidths[0] + colWidths[1] + colWidths[2], currentY)
-        .text(item.status, tableLeft + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3], currentY)
-        .text(item.dealerId?.name || "N/A", tableLeft + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4], currentY);
+        .text(
+          `$${item.priceListed.toLocaleString()}`,
+          tableLeft + colWidths[0] + colWidths[1] + colWidths[2],
+          currentY
+        )
+        .text(
+          item.status,
+          tableLeft + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3],
+          currentY
+        )
+        .text(
+          item.dealerId?.name || "N/A",
+          tableLeft +
+            colWidths[0] +
+            colWidths[1] +
+            colWidths[2] +
+            colWidths[3] +
+            colWidths[4],
+          currentY
+        );
 
       currentY += 15;
     });
@@ -355,11 +471,12 @@ class PDFGenerator {
   generateReportFooter() {
     const doc = this.doc;
 
-    doc.moveDown(2)
+    doc
+      .moveDown(2)
       .fontSize(8)
       .font("Helvetica")
       .text("This report was generated by WatchDealerHub", { align: "center" });
   }
 }
 
-module.exports = PDFGenerator; 
+module.exports = PDFGenerator;

@@ -43,11 +43,15 @@ app.use("/api", require("./routes"))
 
 // items to delete
 app.use('/api/checkout', require('./routes/checkout.routes'));
-app.use('/webhooks', require('./routes/webhook.routes'));
+// Removed duplicate Stripe webhook route: '/webhooks/stripe' (keep '/api/stripe/webhook' only)
+// For Premium Features
+app.use('/api/features', require('./routes/feature.route'));
 
 // Error handler
 app.use(errorHandler);
 // 404 handler
 app.use(notFound);
+
+ 
 
 module.exports = app;

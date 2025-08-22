@@ -3,14 +3,14 @@ const Discount = require("../models/Discount");
 const Redemption = require("../models/Redemption");
 
 exports.handle = async (req, res) => {
-    const sig = req.headers(['stripe-signature']);
+    const sig = req.headers['stripe-signature'];
 
     let event;
 
     try {
-        event = stripe.webhooks.constructEvent(req.rawBody, sig, process.env.STRIPE_WEBHOOK_SECRET);
+        event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
     } catch (error) {
-        return res.statue(400).send("Webhook Error", error.message);
+        return res.status(400).send(`Webhook Error: ${error.message}`);
     }
 
     try {
@@ -50,7 +50,7 @@ exports.handle = async (req, res) => {
             }
             case "invoice.payment_succeeded": {
                 const invoice = event.data.object;
-                const subId = invoice.data.object;
+                const subId = typeof invoice.subscription === 'string' ? invoice.subscription : invoice.subscription?.id || null;
                 const stripeCustomerId = invoice.customer;
 
                 let customerId = invoice.metadata?.customer_id || null;
@@ -81,7 +81,7 @@ exports.handle = async (req, res) => {
                             couponId: invoice.discount?.coupon?.id || null
                         },
                         priceId: invoice.lines?.data?.[0]?.price?.id || null,
-                        quantity: invoice.lines?.dat?.[0]?.price?.id || null,
+                        quantity: invoice.lines?.data?.[0]?.quantity || null,
                         amounts: { currency, subtotal, discount: discountAmount, total },
                         ruleSnapshot: {
                             itemKey: discountDoc?.itemKey || null,
